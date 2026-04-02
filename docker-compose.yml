@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Service 1: Your Django Ninja API
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+
+  # Service 2: Your Local Celery Worker
+  worker:
+    build: .
+    # Note: Replace 'your_project_name' with your actual folder name
+    command: celery -A backend worker --loglevel=info -P solo
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
+
+  # Service 3: Local Redis (The message broker)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"

@@ -15,11 +15,15 @@ from myapi.utilities.chat_history.chat_history import ChatHistoryManager
 from myapi.utilities.hybrid_search.retrievalservice import HybridRetrievalRerankService
 from backend.config import settings
 
+from myapi.utilities.Langgraph.graph import create_rag_agent
+
 
 @api_controller("/documents", tags= ['docs'], auth= JWTAuth())
 class DocumentOperationController(ControllerBase):
     def __init__(self):
         self.llm= CerebrasLLMService()
+
+        self.rag_agent= create_rag_agent(self.llm)
 
 
     @http_post("/", response= DocumentOut)
@@ -80,6 +84,47 @@ class DocumentOperationController(ControllerBase):
             "query": query,
             "response": ai_response
         }
+    
+    @http_get("/ask_agent")
+    @provide_session_id
+    def ask_agent(self, request, query: str, session_id: str | None= None): # rn we are using this input for session id as we dont ahve frontend to catch that session id and hold it so once 
+                                                                            # session id i screated we wil copy it from resopnse and paste it if querying 2nd time so that we can maintain memory saver feature.
+        
+        session_id = request.generated_session_id
+
+        config= {"configurable": {"thread_id": session_id}}
+        
+        # we remove chathistory from here now memory saver will automatically inject older chtas to graph from session_id
+        initial_state= {
+            "query": query,
+            "context": [],
+            "response": "",
+            "sources": [],
+            "user_id": request.user.id
+        }
+
+        final_state= self.rag_agent.invoke(initial_state, config=config)
+
+        # for fetching out all sources websites used 
+        all_sources = list(set(final_state.get("sources", [])))
+
+        ai_response= final_state["response"]
+
+        ChatHistoryManager.add_to_history_db(
+            user= request.user,
+            session_id=session_id,
+            human_query= query,
+            ai_response= ai_response
+        )
+
+        return {
+            "query": query,
+            "response": ai_response,
+            "session_id": session_id,
+            "sources": all_sources
+        }
+
+
 
     
     @http_get("/", response=list[DocumentOut])
@@ -95,7 +140,3 @@ class DocumentOperationController(ControllerBase):
     def get_my_doc(self, request, doc_id: int):
         document= get_object_or_404(Document, user= request.user, id= doc_id, is_deleted= False)
         return document
- 
-
-
-        

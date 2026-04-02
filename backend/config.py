@@ -33,6 +33,8 @@ class Settings(BaseSettings):
 
     reranker_voyage_ai_api_key: SecretStr
 
+    tavily_api_key: SecretStr
+
     model_config= SettingsConfigDict(env_file= ".env",
                                      extra= 'ignore')
 
