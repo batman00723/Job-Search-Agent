@@ -86,12 +86,10 @@ class DocumentOperationController(ControllerBase):
         }
     
     @http_get("/ask_agent")
-    @provide_session_id
-    def ask_agent(self, request, query: str, session_id: str | None= None): # rn we are using this input for session id as we dont ahve frontend to catch that session id and hold it so once 
+    def ask_agent(self, request, query: str): # rn we are using this input for session id as we dont ahve frontend to catch that session id and hold it so once 
                                                                             # session id i screated we wil copy it from resopnse and paste it if querying 2nd time so that we can maintain memory saver feature.
         
-        session_id = request.generated_session_id
-
+        session_id= "aman-session-123"
         config= {"configurable": {"thread_id": session_id}}
         
         # we remove chathistory from here now memory saver will automatically inject older chtas to graph from session_id
@@ -100,6 +98,7 @@ class DocumentOperationController(ControllerBase):
             "context": [],
             "response": "",
             "sources": [],
+            "web_search_done": False,
             "user_id": request.user.id
         }
 
@@ -109,13 +108,6 @@ class DocumentOperationController(ControllerBase):
         all_sources = list(set(final_state.get("sources", [])))
 
         ai_response= final_state["response"]
-
-        ChatHistoryManager.add_to_history_db(
-            user= request.user,
-            session_id=session_id,
-            human_query= query,
-            ai_response= ai_response
-        )
 
         return {
             "query": query,

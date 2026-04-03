@@ -1,5 +1,8 @@
 # Here we will make seperate logic file for chathistory to clean bloatware of doc_conroller.py and it become plug and play.
 
+
+# as of now i implemented postgres saver for agents so WE DONT NEED THIS ANYMORE 
+# GOODBYE 
 from myapi.models import ChatHistory
 from django.db import transaction
 

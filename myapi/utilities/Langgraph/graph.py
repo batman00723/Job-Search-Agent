@@ -1,14 +1,33 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import retrieve_db_node, web_search_node, generate_node
+from .nodes import retrieve_db_node, web_search_node, generate_node, reformulate_query_node
 from typing import TypedDict
 from langchain_google_genai import ChatGoogleGenerativeAI
 from backend.config import settings
-from langgraph.checkpoint.memory import MemorySaver
+from psycopg_pool import ConnectionPool
+from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg.rows import dict_row 
+
 
 class GradeAnswer(TypedDict):
     is_sufficient: bool
 
+DB_URL= settings.db_url.get_secret_value()
+
+connection_kwargs= {
+    "autocommit": True,
+    "prepare_threshold": 0
+}
+
+pool= ConnectionPool(
+    conninfo=DB_URL,
+    max_size=10,
+    open= True,
+    kwargs= connection_kwargs
+)
+
+memory= PostgresSaver(pool)
+memory.setup()
 
 def create_rag_agent(llm):
 
@@ -23,11 +42,14 @@ def create_rag_agent(llm):
 
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("reformulate_query", lambda state: reformulate_query_node(state, llm= llm))
     workflow.add_node("retrieve_db", retrieve_db_node)
     workflow.add_node("web_search", web_search_node)
     workflow.add_node("generate", lambda state: generate_node(state, llm=llm))
 
-    workflow.set_entry_point("retrieve_db")
+    workflow.set_entry_point("reformulate_query")
+
+    workflow.add_edge("reformulate_query", "retrieve_db")
     workflow.add_edge("retrieve_db", "generate")
 
     def router_logic(state: AgentState):
@@ -66,6 +88,5 @@ def create_rag_agent(llm):
     )
     workflow.add_edge("web_search", "generate")
 
-    memory= MemorySaver()
 
     return workflow.compile(checkpointer= memory)

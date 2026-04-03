@@ -1,13 +1,15 @@
 from typing import TypedDict, Annotated
 import operator
 
+
+
 class AgentState(TypedDict):
     query: str
-    chat_history: list
+    chat_history: Annotated[list, operator.add]  # THis chathistory refrest to our postgres saver
     context: list  # either from db or then web if not in db
     response: str
     user_id: int
-    sources: Annotated[list, operator.add] # source from where web data is fetched
+    sources: list # source from where web data is fetched
     web_search_done: bool
 
 ## This is shared memory for our agent each node updates this.

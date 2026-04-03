@@ -25,11 +25,8 @@ def retrieve_db_node(state: AgentState):
             "metadata": getattr(doc, 'metadata', {})
         })
 
-        name = getattr(doc, 'metadata', {}).get('source', 'Local Doc')
-        source_list.append(name)
   
-    return {"context": serializable_chunks,
-            "sources": list(set(source_list))}
+    return {"context": serializable_chunks}
 
 
 
@@ -64,9 +61,46 @@ def web_search_node(state: AgentState):
 
 
 def generate_node(state: AgentState, llm):
+    past_chats= state.get("chat_history", [])[-6:]
+    history_text= "\n".join(past_chats)
+
+    combined_query= f"Past Conversation: \n{history_text}\n\nNew Question: {state["query"]}"
+
     response = llm.gen_ai_answers(
-        user_quey= state["query"],
+        user_quey= combined_query,
         context_chunks= state["context"]
     )
 
-    return {"response": response}
+    new_memory= [f"User: {state['query']}", f"AI: {response}"]
+
+    return {"response": response,
+            "chat_history": new_memory}
+
+
+def reformulate_query_node(state: AgentState, llm):
+    past_chats= state.get("chat_history", [])[-4:]
+    raw_query= state["query"]
+
+    print(f"\n--- [DEBUG: MEMORY CHECK] ---")
+    print(f"Past Messages Count: {len(past_chats)}")
+
+    if not past_chats:
+        return {"query": raw_query}
+    
+    history_text= "\n".join(past_chats)
+
+    prompt= f"""
+    Given the following conversation history: {history_text}
+    Rewrite the following user query to be a standalone, highly specific search engine query. 
+    Replace pronouns with the actual names from the history.
+    If the query is already standalone, just return it exactly as is.
+     
+    User Query: {raw_query}
+    Standalone Query: """
+
+    rewritten_query= llm.gen_ai_answers(prompt,
+                                        context_chunks= [])
+    
+    print(f"Reformulated Query: '{raw_query}' -> '{rewritten_query.strip()}'")
+
+    return {"query": rewritten_query.strip()}
