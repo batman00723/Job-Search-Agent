@@ -145,3 +145,13 @@ EMAIL_USE_TLS = settings.email_use_tls
 EMAIL_HOST_USER = settings.email_host_user
 
 EMAIL_HOST_PASSWORD = settings.email_host_password.get_secret_value()
+
+## Setting up Langsmith
+
+import os
+from backend.config import settings
+
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key.get_secret_value()
+os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint

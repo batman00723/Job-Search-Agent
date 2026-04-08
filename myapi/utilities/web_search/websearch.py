@@ -32,7 +32,7 @@ class WebSearch:
                 url, 
                 data=json.dumps(payload), 
                 headers=headers, 
-                timeout=15
+                timeout=(5, 10),
             )
             
        

@@ -9,7 +9,7 @@ from myapi.background_tasks.background_tasks import document_processing, send_ll
 from django.shortcuts import get_object_or_404
 
 from myapi.utilities.docs_processing.embedding import EmbeddingService
-from myapi.utilities.docs_processing.llm_service import CerebrasLLMService
+from myapi.utilities.docs_processing.llm_service import FastLLMService
 from myapi.utilities.session_manager.session_manager import provide_session_id
 from myapi.utilities.chat_history.chat_history import ChatHistoryManager
 from myapi.utilities.hybrid_search.retrievalservice import HybridRetrievalRerankService
@@ -21,9 +21,9 @@ from myapi.utilities.Langgraph.graph import create_rag_agent
 @api_controller("/documents", tags= ['docs'], auth= JWTAuth())
 class DocumentOperationController(ControllerBase):
     def __init__(self):
-        self.llm= CerebrasLLMService()
+        self.llm_service= FastLLMService()
 
-        self.rag_agent= create_rag_agent(self.llm)
+        self.rag_agent = create_rag_agent(self.llm_service.model)
 
 
     @http_post("/", response= DocumentOut)
@@ -84,12 +84,14 @@ class DocumentOperationController(ControllerBase):
             "query": query,
             "response": ai_response
         }
-    
+
+    import asyncio
+
     @http_get("/ask_agent")
     def ask_agent(self, request, query: str): # rn we are using this input for session id as we dont ahve frontend to catch that session id and hold it so once 
                                                                             # session id i screated we wil copy it from resopnse and paste it if querying 2nd time so that we can maintain memory saver feature.
-        
-        session_id= "aman-session-123"
+        print(">>> ask_agent called") 
+        session_id= "aman-session-dev"
         config= {"configurable": {"thread_id": session_id}}
         
         # we remove chathistory from here now memory saver will automatically inject older chtas to graph from session_id
@@ -102,19 +104,29 @@ class DocumentOperationController(ControllerBase):
             "user_id": request.user.id
         }
 
-        final_state= self.rag_agent.invoke(initial_state, config=config)
+        try:
+            print(">>> invoking graph")
+            final_state= self.rag_agent.invoke(initial_state, config={**config, "recursion_limit":10})
+            print(">>> graph done")
+            # for fetching out all sources websites used 
+            all_sources = list(set(final_state.get("sources", [])))
+            ai_response= final_state["response"]
 
-        # for fetching out all sources websites used 
-        all_sources = list(set(final_state.get("sources", [])))
+            print(f"Current logged in user with user_id: {request.user.id}")
 
-        ai_response= final_state["response"]
-
-        return {
-            "query": query,
-            "response": ai_response,
-            "session_id": session_id,
-            "sources": all_sources
-        }
+            return {
+                "query": query,
+                "response": ai_response,
+                "session_id": session_id,
+                "sources": all_sources
+            }
+        except Exception as e:
+            print (f" Error: {str(e)}")
+            return {
+                "status": "Error",
+                "message": "AI Model is temporarily unavailable try again later",
+                "details": str(e) if settings.debug else "Internal Server Error"
+            }
 
 
 

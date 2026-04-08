@@ -1,12 +1,13 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import retrieve_db_node, web_search_node, generate_node, reformulate_query_node
 from typing import TypedDict
-from langchain_google_genai import ChatGoogleGenerativeAI
 from backend.config import settings
 from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
-from psycopg.rows import dict_row 
+
+from langgraph.prebuilt import ToolNode
+from myapi.utilities.Langgraph.tools import agent_tools
+from .nodes import generate_node, reformulate_query_node,  process_tool_results_node, force_tool_call_node
 
 
 class GradeAnswer(TypedDict):
@@ -23,70 +24,57 @@ pool= ConnectionPool(
     conninfo=DB_URL,
     max_size=10,
     open= True,
-    kwargs= connection_kwargs
+    kwargs= connection_kwargs,
+    reconnect_failed= None,
+    reconnect_timeout=5,
+    max_waiting=5,
+    check= ConnectionPool.check_connection,
 )
 
 memory= PostgresSaver(pool)
 memory.setup()
 
 def create_rag_agent(llm):
+    
+    # Let LLM know these tools exist
+    llm_with_tools= llm.bind_tools(agent_tools)
 
-    gemini_grader = ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite-preview",  
-        temperature=0.1,
-        api_key=settings.google_api_key.get_secret_value()
-    )
-    # structured output is who only gives structured response in our case True or False.
-    # That's why we are using gemini as cerebras doesnt support .get_strutured_output
-    structured_llm = gemini_grader.with_structured_output(GradeAnswer)
+    workflow= StateGraph(AgentState)
 
-    workflow = StateGraph(AgentState)
+    workflow.add_node("reformulate", lambda state: reformulate_query_node(state, llm= llm))
 
-    workflow.add_node("reformulate_query", lambda state: reformulate_query_node(state, llm= llm))
-    workflow.add_node("retrieve_db", retrieve_db_node)
-    workflow.add_node("web_search", web_search_node)
-    workflow.add_node("generate", lambda state: generate_node(state, llm=llm))
+    workflow.add_node("force_tool_call", force_tool_call_node)  # NEW
 
-    workflow.set_entry_point("reformulate_query")
+    # We are passing llm with tools binded to generate node
+    workflow.add_node("generate", lambda state: generate_node(state, llm= llm_with_tools))
 
-    workflow.add_edge("reformulate_query", "retrieve_db")
-    workflow.add_edge("retrieve_db", "generate")
+    # Tool Node is a pre-built worker to run parallel tools automatically 
+    # ToolNode triggres both tools at same time
+    workflow.add_node("tools", ToolNode(agent_tools))
 
-    def router_logic(state: AgentState):
+    workflow.add_node("process_tools", process_tool_results_node) # NEW ADDED
 
-        if state.get("web_search_done"):
-            return "end"
+    workflow.set_entry_point("reformulate")
 
-        prompt = (
-            f"User Query: {state['query']}\n"
-            f"AI Response: {state['response']}\n\n"
-            "Assess if the AI Response actually answered the question using specific facts. "
-            "or if it gives a 'sorry' or 'I don't know' type message. "
-            "Return is_sufficient=true only if the answer is factually useful and correct."
-        )
+    workflow.add_edge("reformulate", "force_tool_call")
+    workflow.add_edge("force_tool_call", "tools")
+    workflow.add_edge("tools", "process_tools")
+    workflow.add_edge("process_tools", "generate")
 
-        try:
-            decision = structured_llm.invoke(prompt)
-
-            if decision.get("is_sufficient"):
-                return "end"
-            return "web_search"
-
-        except Exception as e:
-            # fallback check response text manually
-            response_lower = state["response"].lower()
-            if "sorry" in response_lower or "don't have enough" in response_lower:
-                return "web_search"
-            return "end"
+    def should_continue(state: AgentState):
+        last_message = state["messages"][-1]
+        print(">>> tool_calls after generate:", last_message.tool_calls)
+        if last_message.tool_calls:
+            return "tools"
+        return "end"
 
     workflow.add_conditional_edges(
-        "generate", router_logic,
-        {
-            "web_search": "web_search",
-            "end": END
-        }
+        "generate",
+        should_continue,
+        {"tools": "tools", "end": END}
     )
-    workflow.add_edge("web_search", "generate")
 
+    return workflow.compile(checkpointer=memory)
 
-    return workflow.compile(checkpointer= memory)
+## Here as you can see I'm using LLM driven tools selection as LLM decides which tools to use and
+## in this way we save much token but do do rely on LLM which sometimes hallucinate that's a trade off to hardcoding tol call.

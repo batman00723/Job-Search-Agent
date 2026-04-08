@@ -46,47 +46,33 @@ class GeminiLLMService:
     
 # using cerebras because gemini can sometimes stop giving access to free models due to usage spike.
 
-from cerebras.cloud.sdk import Cerebras
 from backend.config import settings
+from langchain_groq import ChatGroq
 
 class CerebrasLLMService:
     def __init__(self):
-        # 1. Ensure 'cerebras_api_key' is added to your config.py/Settings class
-        # 2. Ensure 'CEREBRAS_API_KEY' is in your .env file
-        self.client = Cerebras(api_key=settings.cerebras_api_key.get_secret_value())
-        self.model_id = "qwen-3-235b-a22b-instruct-2507"
-
-    def gen_ai_answers(self, user_quey, context_chunks, chat_history=None):
-        # Join chunks exactly as you did before
-        context_text = "\n\n".join([
-        chunk.get('page_content', '') for chunk in context_chunks
-    ])
-
-
-        system_prompt = (
-        "You are a helpful assistant. You MUST answer ONLY using the provided context. "
-        "Do NOT use your training data or prior knowledge under any circumstances. "
-        "If the context does not contain the answer, say 'Sorry, I don't have enough information.' "
-        "Never mention a knowledge cutoff date."
-         )
-
-        # Build the messages list
-        messages = [{"role": "system", "content": system_prompt}]
-
-        # Add History: Convert "model" to "assistant" for cerebras to understand
-        if chat_history:
-            for msg in chat_history:
-                role = "user" if msg.message_by == "human" else "assistant"
-                messages.append({"role": role, "content": msg.content})
-
-        # recent user query + context
-        user_prompt = f"Context: \n{context_text}\n\nQuestion: {user_quey}"
-        messages.append({"role": "user", "content": user_prompt})
-
-        response = self.client.chat.completions.create(
-            model=self.model_id,
-            messages=messages,
-            temperature=0.6,
-            max_completion_tokens=600
+        # The single source of truth for the LLM engine
+        self.model = ChatGroq(
+            api_key=settings.groq_api_key.get_secret_value(),
+            model="qwen/qwen3-32b", 
+            temperature=0.5,
+            max_tokens=1024,
+            max_retries=3,
+            timeout=20
         )
-        return response.choices[0].message.content
+
+    def invoke(self, messages):
+        response = self.model.invoke(messages)
+        return response
+    
+
+class FastLLMService:
+    def __init__(self):
+        self.model= ChatGroq(
+            api_key= settings.groq_api_key.get_secret_value(),
+            model= "llama-3.1-8b-instant",
+            temperature= 0.0,
+        )
+    def invoke(self, messages):
+        response= self.model.invoke(messages)
+        return response

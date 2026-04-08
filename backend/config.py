@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr
+from pydantic import SecretStr, Field
 
 class Settings(BaseSettings):
     secret_key: SecretStr
@@ -29,11 +29,17 @@ class Settings(BaseSettings):
     main_model_name: str = "gemini-3.1-flash-lite-preview"
 
     cerebras_api_key: SecretStr
+    groq_api_key: SecretStr
 
 
     reranker_voyage_ai_api_key: SecretStr
 
     tavily_api_key: SecretStr
+
+    langsmith_api_key: SecretStr
+    langsmith_tracing: str = "true"
+    langsmith_project: str 
+    langsmith_endpoint: str 
 
     model_config= SettingsConfigDict(env_file= ".env",
                                      extra= 'ignore')

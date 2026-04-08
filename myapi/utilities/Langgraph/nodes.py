@@ -1,106 +1,161 @@
-from myapi.utilities.hybrid_search.retrievalservice import HybridRetrievalRerankService
-from myapi.utilities.docs_processing.embedding import EmbeddingService
-from myapi.utilities.docs_processing.llm_service import CerebrasLLMService
-from myapi.utilities.web_search.websearch import WebSearch
 from myapi.utilities.Langgraph.state import AgentState
-from types import SimpleNamespace
+from langchain_core.messages import SystemMessage, HumanMessage
 
-def retrieve_db_node(state: AgentState):
-    query_vector = EmbeddingService.get_embedding(state["query"])
 
-    # This returns a list of OBJECTS 
-    raw_chunks = HybridRetrievalRerankService.get_hybrid_reranked_content(
-        user=state["user_id"],  
-        query=state["query"],
-        query_vector=query_vector,
-        top_k=5
+def reformulate_query_node(state: AgentState, llm):
+    # 1. Get existing data from state
+    raw_query = state.get("query", "")
+    messages = state.get("messages", [])
+    user_id = state.get("user_id") # <-- MUST define this first
+
+    # 2. If it's the first message, just pass through
+    if not messages:
+        return {
+            "query": raw_query,
+            "messages": [HumanMessage(content=raw_query)],
+            "user_id": user_id
+        }
+
+    # 3. Proper prompt that actually includes the history
+    # If the user says "What about his age?", the LLM needs the history to know who "his" is.
+    history_text = "\n".join([f"{type(m).__name__}: {m.content}" for m in messages[-5:]]) # Last 5 messages
+    
+    prompt = (
+        "Given the following chat history and a new user query, "
+        "rephrase the query to be a standalone search term.\n\n"
+        f"History:\n{history_text}\n\n"
+        f"New Query: {raw_query}\n"
+        "Standalone Query:"
+        "Only return Standalone Query"
     )
-
-    # Convert those objects into simple, dictionaries (json serialisable)
-    serializable_chunks = []
-    source_list = []
-    for doc in raw_chunks:
-        serializable_chunks.append({
-            "page_content": getattr(doc, 'page_content', str(doc)), 
-            "metadata": getattr(doc, 'metadata', {})
-        })
-
-  
-    return {"context": serializable_chunks}
-
-
-
-def web_search_node(state: AgentState):
-    query = state["query"]
     
-    search_results = WebSearch.search_the_web(query=query)
-    
-    if isinstance(search_results, str): 
-        return {"context": [], "sources": ["Web Search Error"], "web_search_done": True}
+    rewritten_query = llm.invoke(prompt).content
 
-    urls = [res.get("url") for res in search_results if res.get("url")]
-    
-    formatted_text = "\n\n".join([
-        f"Source: {res.get('url')}\nContent: {res.get('content')}" 
-        for res in search_results
-    ])
-    
-    web_chunks = [{
-        "page_content": formatted_text, 
-        "metadata": {"source": "web_search"}
-    }]
-    
-    print(f"WEB SEARCH SUCCESS: Found {len(urls)} links.")
+    import re
 
+    rewritten_query = llm.invoke(prompt).content
+    rewritten_query = re.sub(r'<think>.*?</think>', '', rewritten_query, flags=re.DOTALL)
+    rewritten_query = re.sub(r'\*+|"', '', rewritten_query)  # strip ** and quotes
+    rewritten_query = rewritten_query.replace("Standalone Query:", "").strip()
+
+    # Take only first line in case model adds explanation after
+    rewritten_query = rewritten_query.split('\n')[0].strip()
+    # 4. Return everything to keep the state alive
+    print(f"{raw_query} ->> {rewritten_query}")
     return {
-        "context": web_chunks, 
-        "sources": urls, 
-        "web_search_done": True
+        "query": rewritten_query.strip(),
+        "messages": [HumanMessage(content=raw_query)],
+        "user_id": user_id 
+    }
+
+
+# generate node first looks for context to give answer if no context found then it invoke tools call (db serach and websearch)
+# then again loops after tools called and this time state has context so this time it doesnt calls tools cus it has context
+def generate_node(state: AgentState, llm):
+
+    context_list = []
+    for doc in state.get("context", [])[:5]:
+        source = doc.get('metadata', {}).get('source', 'unknown')
+        content = doc.get('page_content', '')[:500]
+        context_list.append(f"SOURCE: {source}\nCONTENT: {content}")
+    
+    context_text = "\n\n---\n\n".join(context_list)
+
+    system_instructions = f"""You are a strictly grounded RAG Agent.
+        Use ONLY the provided CONTEXT to answer. 
+        If the CONTEXT is empty or does not contain the answer, say 'I don't know based on my data.
+        DO NOT use your internal knowledge ever.
+    CONTEXT:
+    {context_text}"""
+
+    # Combine System + History
+    # state["messages"] now contains the HumanMessage we added in the previous node
+    messages = [SystemMessage(content=system_instructions)] + state["messages"][-4:]
+
+    response = llm.invoke(messages)
+
+    #Handle Tool Calls vs Final Answer
+    return {
+        "messages": [response],
+        "response": response.content if not response.tool_calls else ""
     }
 
 
 
-def generate_node(state: AgentState, llm):
-    past_chats= state.get("chat_history", [])[-6:]
-    history_text= "\n".join(past_chats)
 
-    combined_query= f"Past Conversation: \n{history_text}\n\nNew Question: {state["query"]}"
 
-    response = llm.gen_ai_answers(
-        user_quey= combined_query,
-        context_chunks= state["context"]
+
+# nodes.py — add this new node
+
+import json
+from langchain_core.messages import ToolMessage
+
+def process_tool_results_node(state: AgentState):
+    print(">>> process_tool_results_node called")
+    """
+    ToolNode puts results into messages as ToolMessage.
+    This node extracts context/sources/web_search_done from those messages
+    and writes them into state properly.
+    """
+    messages = state.get("messages", [])
+    
+    accumulated_context = list(state.get("context", []))  # keep existing context
+    accumulated_sources = list(state.get("sources", []))
+    web_search_done = state.get("web_search_done", False)
+
+    for msg in reversed(messages):  # only process latest tool results
+        if not isinstance(msg, ToolMessage):
+            break  # stop at the first non-tool message from the end
+        
+        try:
+            result = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if "context" in result:
+            accumulated_context.extend(result["context"])
+        if "sources" in result:
+            accumulated_sources.extend(result["sources"])
+        if "web_search_done" in result:
+            web_search_done = result["web_search_done"]
+
+        print(">>> raw tool content:", str(msg.content)[:500])
+
+    return {
+        "context": accumulated_context,
+        "sources": accumulated_sources,
+        "web_search_done": web_search_done,
+    }
+
+
+from langchain_core.messages import AIMessage
+import uuid
+
+def force_tool_call_node(state: AgentState):
+    """
+    Context is empty — bypass LLM decision and directly invoke both tools.
+    Construct a fake AIMessage with tool_calls so ToolNode can run them.
+    """
+    query = state.get("query", "")
+    user_id = state.get("user_id")
+
+    print(">>> forcing tool calls for query:", query)
+
+    fake_ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "retrieve_document",
+                "args": {"query": query, "user_id": user_id},
+                "id": str(uuid.uuid4()),
+                "type": "tool_call"
+            },
+            {
+                "name": "web_search",
+                "args": {"query": query, "user_id": user_id},
+                "id": str(uuid.uuid4()),
+                "type": "tool_call"
+            }
+        ]
     )
-
-    new_memory= [f"User: {state['query']}", f"AI: {response}"]
-
-    return {"response": response,
-            "chat_history": new_memory}
-
-
-def reformulate_query_node(state: AgentState, llm):
-    past_chats= state.get("chat_history", [])[-4:]
-    raw_query= state["query"]
-
-    print(f"\n--- [DEBUG: MEMORY CHECK] ---")
-    print(f"Past Messages Count: {len(past_chats)}")
-
-    if not past_chats:
-        return {"query": raw_query}
-    
-    history_text= "\n".join(past_chats)
-
-    prompt= f"""
-    Given the following conversation history: {history_text}
-    Rewrite the following user query to be a standalone, highly specific search engine query. 
-    Replace pronouns with the actual names from the history.
-    If the query is already standalone, just return it exactly as is.
-     
-    User Query: {raw_query}
-    Standalone Query: """
-
-    rewritten_query= llm.gen_ai_answers(prompt,
-                                        context_chunks= [])
-    
-    print(f"Reformulated Query: '{raw_query}' -> '{rewritten_query.strip()}'")
-
-    return {"query": rewritten_query.strip()}
+    return {"messages": [fake_ai_message]}
