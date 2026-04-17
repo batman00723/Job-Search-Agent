@@ -24,8 +24,8 @@ The system operates in a stateful manner:
 ### **1. Agentic Memory & Persistence**
 Utilises a **PostgreSQL Checkpointer** (via `langgraph-checkpoint-postgres`) to maintain session state. This allows the agent to remember previous job results and chat history across server restarts, effectively turning a script into a persistent application.
 
-### **2. Hybrid Retrieval Engine**
-Unlike standard vector-only RAG, this system uses a hybrid approach:
+### **2. Hybrid Retrieval **
+
 * **Semantic Search:** Using OpenAI/Groq embeddings for project-to-job matching.
 * **Keyword Extraction:** Ensuring hard skills (Python, LangGraph, React) are strictly validated.
 * **Reranking:** Re-evaluating top results to minimise hallucinations and edge cases.
@@ -34,9 +34,10 @@ Unlike standard vector-only RAG, this system uses a hybrid approach:
 ## Tech Stack
 
 - **Framework:** Django Ninja & LangGraph
-- **Interference:** Cerebras (Llama 3 8B)
-- **Database:** PostgreSQL 
+- **Interference Model:** Cerebras (Llama 3 8B)
+- **Database:** PostgreSQL
+- **Background Worker:** Celery(Workers) with Redis (Queue) 
 - **Search & Scrape:** Tavily API & Crawl4AI
-- **Memory:** PostgresSaver Checkpointing
+- **Memory:** PostgresSaver Checkpointer
 
 ---
