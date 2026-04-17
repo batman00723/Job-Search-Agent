@@ -10,3 +10,4 @@ media/
 .pytest_cache/
 .mypy_cache/
 .cache/
+.local-browsers/

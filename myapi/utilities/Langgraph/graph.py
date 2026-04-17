@@ -1,80 +1,54 @@
 from langgraph.graph import StateGraph, END
-from .state import AgentState
-from typing import TypedDict
+from .state import JobAgentState
 from backend.config import settings
 from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
+from .nodes import rewrite_query_node, search_node, router, scrape_job_node, analyse_jobs_node, intent_classifier_node, chat_node
+from functools import partial
 
-from langgraph.prebuilt import ToolNode
-from myapi.utilities.Langgraph.tools import agent_tools
-from .nodes import generate_node, reformulate_query_node,  process_tool_results_node, force_tool_call_node
+DB_URL = settings.db_url.get_secret_value()
 
-
-class GradeAnswer(TypedDict):
-    is_sufficient: bool
-
-DB_URL= settings.db_url.get_secret_value()
-
-connection_kwargs= {
-    "autocommit": True,
-    "prepare_threshold": 0
-}
-
-pool= ConnectionPool(
+_pool = ConnectionPool(
     conninfo=DB_URL,
     max_size=10,
-    open= True,
-    kwargs= connection_kwargs,
-    reconnect_failed= None,
-    reconnect_timeout=5,
-    max_waiting=5,
-    check= ConnectionPool.check_connection,
+    kwargs={"autocommit": True, "prepare_threshold": 0}
 )
 
-memory= PostgresSaver(pool)
+
+memory = PostgresSaver(_pool)
 memory.setup()
 
-def create_rag_agent(llm):
-    
-    # Let LLM know these tools exist
-    llm_with_tools= llm.bind_tools(agent_tools)
+def create_agent(llm):
+    workflow = StateGraph(JobAgentState)
 
-    workflow= StateGraph(AgentState)
+    workflow.add_node("intent_classifier", partial(intent_classifier_node, llm=llm))
+    workflow.add_node("chat_node", partial(chat_node, llm=llm))
+    workflow.add_node("rewrite", partial(rewrite_query_node, llm=llm))
+    workflow.add_node("search_jobs", search_node)
+    workflow.add_node("scrape_jobs", scrape_job_node)
+    workflow.add_node("analyse_results", partial(analyse_jobs_node, llm=llm))
 
-    workflow.add_node("reformulate", lambda state: reformulate_query_node(state, llm= llm))
-
-    workflow.add_node("force_tool_call", force_tool_call_node)  # NEW
-
-    # We are passing llm with tools binded to generate node
-    workflow.add_node("generate", lambda state: generate_node(state, llm= llm_with_tools))
-
-    # Tool Node is a pre-built worker to run parallel tools automatically 
-    # ToolNode triggres both tools at same time
-    workflow.add_node("tools", ToolNode(agent_tools))
-
-    workflow.add_node("process_tools", process_tool_results_node) # NEW ADDED
-
-    workflow.set_entry_point("reformulate")
-
-    workflow.add_edge("reformulate", "force_tool_call")
-    workflow.add_edge("force_tool_call", "tools")
-    workflow.add_edge("tools", "process_tools")
-    workflow.add_edge("process_tools", "generate")
-
-    def should_continue(state: AgentState):
-        last_message = state["messages"][-1]
-        print(">>> tool_calls after generate:", last_message.tool_calls)
-        if last_message.tool_calls:
-            return "tools"
-        return "end"
-
+    workflow.set_entry_point("intent_classifier")
     workflow.add_conditional_edges(
-        "generate",
-        should_continue,
-        {"tools": "tools", "end": END}
+        "intent_classifier",
+        lambda x: x.next_action,
+        {
+            "search": "rewrite",
+            "chat": "chat_node"
+        }
     )
+    workflow.add_edge("rewrite", "search_jobs")
+    workflow.add_conditional_edges(
+        "search_jobs",
+        router,
+        {
+            "scrape_job_node": "scrape_jobs",
+            "rewrite_query_node": "rewrite",
+            "end": END
+        }
+    )
+    workflow.add_edge("scrape_jobs", "analyse_results")
+    workflow.add_edge("analyse_results", END)
+    workflow.add_edge("chat_node", END)
 
     return workflow.compile(checkpointer=memory)
-
-## Here as you can see I'm using LLM driven tools selection as LLM decides which tools to use and
-## in this way we save much token but do do rely on LLM which sometimes hallucinate that's a trade off to hardcoding tol call.

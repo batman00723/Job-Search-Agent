@@ -17,29 +17,27 @@ class HybridRetrievalRerankService:
 
         search_query= SearchQuery(query, config='english', search_type='websearch')
 
-        keyword_result= DocumentChunk.objects.filter(
-            document__user= user,
-            search_vector= search_query
-        ).order_by("-id")[:20]
-
-        print(f"DEBUG: Vector Results Found: {vector_results.count()}")
-        print(f"DEBUG: Keyword Results Found: {keyword_result.count()}")
+        keyword_result = DocumentChunk.objects.filter(
+            document__user=user,
+            search_vector=search_query
+        ).annotate(
+            rank=SearchRank('search_vector', search_query)
+        ).order_by("-rank")[:20]
 
         fused_score = reciprocal_rank_fusion(vector_results=vector_results, keyword_results=keyword_result)
-        print(f"DEBUG: RRF Fused IDs: {fused_score}")
 
         canditate_ids = [item[0] for item in fused_score[:20]]
         candidate_context_chunks = list(DocumentChunk.objects.filter(id__in=canditate_ids))
-        print(f"DEBUG: Final Chunks to LLM: {len(candidate_context_chunks)}")
 
-        final_context= RerankService.get_top_reranked_results(
+        final_context_objects= RerankService.get_top_reranked_results(
            query= query,
            chunks= candidate_context_chunks,
            top_k= 5
         )
 
-        final_context = candidate_context_chunks[:5] 
+        # This returns list of strings (JSON Serialisable) for State to pass on
+        result_in_string= [obj.chunk for obj in final_context_objects]
 
-        return final_context
+        return result_in_string
     
 

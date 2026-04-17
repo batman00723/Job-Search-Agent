@@ -1,161 +1,234 @@
-from myapi.utilities.Langgraph.state import AgentState
-from langchain_core.messages import SystemMessage, HumanMessage
+from myapi.utilities.hybrid_search.retrievalservice import HybridRetrievalRerankService
+from myapi.utilities.docs_processing.embedding import EmbeddingService
+from myapi.utilities.web_search.websearch import WebSearch
+from myapi.utilities.Langgraph.state import JobAgentState
+from langchain_core.messages import SystemMessage, HumanMessage, trim_messages, ToolMessage, AIMessage
+from langgraph.graph import END
+import asyncio
+from crawl4ai import AsyncWebCrawler
+
+trimmer= trim_messages(
+    max_tokens=500,
+    strategy="last",
+    token_counter=len,
+    include_system=True,
+    start_on="human",
+)
 
 
-def reformulate_query_node(state: AgentState, llm):
-    # 1. Get existing data from state
-    raw_query = state.get("query", "")
-    messages = state.get("messages", [])
-    user_id = state.get("user_id") # <-- MUST define this first
+def rewrite_query_node(state: JobAgentState, llm):
+    message_history= trimmer.invoke(state.messages)
+    raw_query= state.query
 
-    # 2. If it's the first message, just pass through
-    if not messages:
-        return {
-            "query": raw_query,
-            "messages": [HumanMessage(content=raw_query)],
-            "user_id": user_id
-        }
+    print(f"Past Messages Count: {len(message_history)}")
 
-    # 3. Proper prompt that actually includes the history
-    # If the user says "What about his age?", the LLM needs the history to know who "his" is.
-    history_text = "\n".join([f"{type(m).__name__}: {m.content}" for m in messages[-5:]]) # Last 5 messages
+    if not message_history:
+        return {"query": raw_query }
     
-    prompt = (
-        "Given the following chat history and a new user query, "
-        "rephrase the query to be a standalone search term.\n\n"
-        f"History:\n{history_text}\n\n"
-        f"New Query: {raw_query}\n"
-        "Standalone Query:"
-        "Only return Standalone Query"
+
+    system_prompt = (
+            "You are an expert recruitment researcher. Your task is to rewrite the user's "
+            "latest query into a search engine string. "
+            "CRITICAL: Look at the chat history to resolve pronouns (e.g., if the user says 'that company', "
+            "find the company name in previous messages). "
+            "Output ONLY the rewritten search string."
+        )
+    
+    # Combine history with new system prompt 
+    # We add user current query at the end
+    message_for_llm= [SystemMessage(content=system_prompt)] + message_history
+    message_for_llm.append(HumanMessage(content=f"Orignal Query: {raw_query}"))
+
+    # We use ainvoke for await it is async version of invoke
+    optimised_query= llm.invoke(message_for_llm).content
+
+    # From return state will be updated
+    return {
+        "query": optimised_query,
+        "messages": [HumanMessage(content= f"Refined search to: {optimised_query}")]
+    }
+
+
+
+
+import asyncio
+
+def search_node(state: JobAgentState):
+    """Takes optimised query and finds job links on the web"""
+    query = state.query
+    
+    print(f"Searching for: {query}")
+
+    # FIX: Run the async search synchronously using a temporary loop
+    try:
+        # This forces the coroutine to finish and returns the actual list
+        search_results = asyncio.run(WebSearch.search_the_web(query=query))
+    except Exception as e:
+        print(f"Search failed: {e}")
+        return {"job_urls": [], "messages": [ToolMessage(content="Search failed", tool_call_id="tavily_Search")]}
+
+    if isinstance(search_results, str): 
+        return {"job_urls": [], "sources": ["Web Search Error"]}
+
+    # Now search_results is a real LIST
+    links = [res.get("url") for res in search_results if res.get("url")]
+
+    print(f"WEB SEARCH SUCCESS: Found {len(links)} links.")
+
+    result_message = ToolMessage(
+        content=f"Found {len(links)} potential job links.",
+        tool_call_id="tavily_Search"
     )
-    
-    rewritten_query = llm.invoke(prompt).content
 
-    import re
-
-    rewritten_query = llm.invoke(prompt).content
-    rewritten_query = re.sub(r'<think>.*?</think>', '', rewritten_query, flags=re.DOTALL)
-    rewritten_query = re.sub(r'\*+|"', '', rewritten_query)  # strip ** and quotes
-    rewritten_query = rewritten_query.replace("Standalone Query:", "").strip()
-
-    # Take only first line in case model adds explanation after
-    rewritten_query = rewritten_query.split('\n')[0].strip()
-    # 4. Return everything to keep the state alive
-    print(f"{raw_query} ->> {rewritten_query}")
     return {
-        "query": rewritten_query.strip(),
-        "messages": [HumanMessage(content=raw_query)],
-        "user_id": user_id 
-    }
-
-
-# generate node first looks for context to give answer if no context found then it invoke tools call (db serach and websearch)
-# then again loops after tools called and this time state has context so this time it doesnt calls tools cus it has context
-def generate_node(state: AgentState, llm):
-
-    context_list = []
-    for doc in state.get("context", [])[:5]:
-        source = doc.get('metadata', {}).get('source', 'unknown')
-        content = doc.get('page_content', '')[:500]
-        context_list.append(f"SOURCE: {source}\nCONTENT: {content}")
-    
-    context_text = "\n\n---\n\n".join(context_list)
-
-    system_instructions = f"""You are a strictly grounded RAG Agent.
-        Use ONLY the provided CONTEXT to answer. 
-        If the CONTEXT is empty or does not contain the answer, say 'I don't know based on my data.
-        DO NOT use your internal knowledge ever.
-    CONTEXT:
-    {context_text}"""
-
-    # Combine System + History
-    # state["messages"] now contains the HumanMessage we added in the previous node
-    messages = [SystemMessage(content=system_instructions)] + state["messages"][-4:]
-
-    response = llm.invoke(messages)
-
-    #Handle Tool Calls vs Final Answer
-    return {
-        "messages": [response],
-        "response": response.content if not response.tool_calls else ""
+        "job_urls": links, 
+        "messages": [result_message],
+        "retry_count": state.retry_count + 1,
     }
 
 
 
-
-
-
-# nodes.py — add this new node
-
-import json
-from langchain_core.messages import ToolMessage
-
-def process_tool_results_node(state: AgentState):
-    print(">>> process_tool_results_node called")
+def router(state: JobAgentState):
     """
-    ToolNode puts results into messages as ToolMessage.
-    This node extracts context/sources/web_search_done from those messages
-    and writes them into state properly.
+    Looks at 'job_urls' and decide: Scrape. Retry, or Give Up.
     """
-    messages = state.get("messages", [])
+    # If links found then move to scrape node this is not necessary but better to be explicit.
+    if state.job_urls and len(state.job_urls) > 0:
+        print(f"Routing: Found {len(state.job_urls)} links. Next Step- Scraping")
+        return "scrape_job_node"
     
-    accumulated_context = list(state.get("context", []))  # keep existing context
-    accumulated_sources = list(state.get("sources", []))
-    web_search_done = state.get("web_search_done", False)
+    # If links not found going back to rewrite query node
+    if not state.job_urls:
+        if state.retry_count < 3:
+            print(f"No links found. Retying attempt {state.retry_count + 1}/3")
+            return "rewrite_query_node"
+        else:
+            print("Sorry! But ig you'll remain unemployed for now, cus we can't even find a shit for you.")
+            return END
+        
 
-    for msg in reversed(messages):  # only process latest tool results
-        if not isinstance(msg, ToolMessage):
-            break  # stop at the first non-tool message from the end
+
+def scrape_job_node(state: JobAgentState):
+    urls = state.job_urls[:5]
+    if not urls:
+        return {"messages": ["No URLs to scrape."]}
+
+    print(f"Scraping {len(urls)} links...")
+
+    async def run_crawl():
+        async with AsyncWebCrawler() as crawler:
+            results = await crawler.arun_many(urls=urls)
+            return [res.markdown for res in results if res.success]
+
+
+    scraped_texts = asyncio.run(run_crawl())
+
+    return {
+        "scraped_content": scraped_texts,
+        "messages": [f"Successfully scraped {len(scraped_texts)} jobs."]
+    }
+    
+
+def analyse_jobs_node(state: JobAgentState, llm):
+    """
+    Compares scraped job descriptions against the resume stored in database.
+    """
+    resume_query= "Detailed professional experience, technical skills,and projects"
+    query_vector= EmbeddingService.get_embedding(resume_query)
+
+    resume_context_list= HybridRetrievalRerankService.get_hybrid_reranked_content(
+        user= state.user_id,
+        query= resume_query,
+        query_vector=query_vector,
+        top_k= 5
+    )
+
+    resume_context = "\n---\n".join(resume_context_list)
+
+    analysis_report = []
+
+    for job_text in state.scraped_content:
+        # trimming text as to be within llm token limits
+        trimmed_job = job_text[:5000] 
+
+        system_prompt = (
+            "You are a blunt, elite Technical Recruiter. Analyze the Resume against the Job. "
+            "Your response MUST be in this EXACT format:\n\n"
+            "COMPANY: [Company Name]\n"
+            "ROLE: [Job Title]\n"
+            "LINK: [Paste the Link Provided]\n"
+            "SCORE: [0-100]\n"
+            "GAP: [Blunt reason for rejection]\n"
+            "EDGE: [Why you are a top 1% candidate]\n"
+        )
+
+        user_prompt = f"RESUME CONTEXT: \n{resume_context}\n\nJOB DESCRIPTION:\n{trimmed_job}"
         
         try:
-            result = json.loads(msg.content)
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-        if "context" in result:
-            accumulated_context.extend(result["context"])
-        if "sources" in result:
-            accumulated_sources.extend(result["sources"])
-        if "web_search_done" in result:
-            web_search_done = result["web_search_done"]
-
-        print(">>> raw tool content:", str(msg.content)[:500])
+            response = llm.invoke([
+                ("system", system_prompt),
+                ("user", user_prompt)
+            ]).content
+            analysis_report.append(response)
+        except Exception as e:
+            print(f"LLM Error on job: {e}")
+            continue # skip failed jobs and move to next
 
     return {
-        "context": accumulated_context,
-        "sources": accumulated_sources,
-        "web_search_done": web_search_done,
+        "match_reports": [{"report": r} for r in analysis_report],
+        "messages": [AIMessage(content=f"Completed analysis of {len(analysis_report)} jobs.")]
     }
 
 
-from langchain_core.messages import AIMessage
-import uuid
 
-def force_tool_call_node(state: AgentState):
+
+
+def intent_classifier_node(state: JobAgentState, llm):
     """
-    Context is empty — bypass LLM decision and directly invoke both tools.
-    Construct a fake AIMessage with tool_calls so ToolNode can run them.
+    Determines if the user wants a NEW search or a FOLLOW-UP conversation.
     """
-    query = state.get("query", "")
-    user_id = state.get("user_id")
+    reports= getattr(state, "match_reports", [])
+    # If we have no reports yet, we MUST search
+    if not reports:
+        return {"next_action": "search"}
 
-    print(">>> forcing tool calls for query:", query)
-
-    fake_ai_message = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "retrieve_document",
-                "args": {"query": query, "user_id": user_id},
-                "id": str(uuid.uuid4()),
-                "type": "tool_call"
-            },
-            {
-                "name": "web_search",
-                "args": {"query": query, "user_id": user_id},
-                "id": str(uuid.uuid4()),
-                "type": "tool_call"
-            }
-        ]
+    system_prompt = (
+        "You are a routing gatekeeper. Analyze the user's message. "
+        "CRITICAL RULES:\n"
+        "1. If the user is expressing an opinion ('these are bad jobs'), asking a follow-up "
+        "('tell me more'), or seeking advice ('which should I pick?'), return 'chat'.\n"
+        "2. Only return 'search' if the user provides a NEW job title or a NEW location "
+        "to search for (e.g., 'Find me Backend roles' or 'Search in Bangalore').\n"
+        "Output ONLY 'chat' or 'search'."
     )
-    return {"messages": [fake_ai_message]}
+    
+    classification = llm.invoke([
+        ("system", system_prompt),
+        ("user", state.query)
+    ]).content.lower().strip()
+
+    # Default to search if unsure
+    action = "chat" if "chat" in classification else "search"
+    return {"next_action": action}
+
+def chat_node(state: JobAgentState, llm):
+    """
+    Discusses existing results without re-scraping.
+    """
+    reports = "\n\n".join([r['report'] for r in state.match_reports])
+    
+    system_prompt = (
+        "You are an elite, blunt Career Coach. You have already found several jobs for the user. "
+        "Use the provided reports to answer the user's specific feedback or questions. "
+        "If the user says the jobs are 'shit', acknowledge it, explain why they were picked, "
+        "and ask what they'd prefer to see instead. Don't just repeat the reports."
+    )
+    
+    user_prompt = f"Context: {reports}\n\nQuestion: {state.query}"
+    
+    response = llm.invoke([
+        ("system", system_prompt),
+        ("user", user_prompt)
+    ])
+
+    return {"messages": [response]}

@@ -10,11 +10,11 @@ class SearchSchema(Schema):
     query: str= Field(description= "The reformulated standalone search query")
     user_id: int = Field(description= "The numeric ID of user for document security")
 
+
 @tool(args_schema=SearchSchema)
 def retrieve_document(query: str, user_id: int):
     """Search and retrieve relevant documents from the local database."""
-    
-    # 1. Get the raw Django objects
+
     raw_chunks = HybridRetrievalRerankService.get_hybrid_reranked_content(
         user=user_id,
         query=query,
@@ -22,15 +22,11 @@ def retrieve_document(query: str, user_id: int):
         top_k=5
     )
     
-    # 2. Extract ONLY the text (string) from each object
-    # This is where we avoid the JSON Serializable error!
     clean_strings = []
     for doc in raw_chunks:
-        # doc.chunk is a string. Strings are JSON serializable.
         text = getattr(doc, 'chunk', "")
         if text:
             clean_strings.append(text)
-    
     if not clean_strings:
         return "No personal data found."
         
