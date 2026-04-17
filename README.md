@@ -7,6 +7,9 @@ Job-Search-Agent is an AI system that orchestrates specialised agents to automat
 
 ## System Architecture
 
+<p align="center">
+  <img src="job agent.png" width="600" title="System Architecture">
+</p>
 
 The system operates in a stateful manner:
 1.  **Intent Classifier:** Analyses the query to decide between a fresh search or a follow-up conversation.
