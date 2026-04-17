@@ -1,7 +1,7 @@
 # Job-Search-Agent 
 ### **A Stateful, Agentic RAG Pipeline for Job Analysis**
 
-Job-Search-Agent is an AI system that orchestrates specialised agents to automate the end-to-end process of job hunting. By combining **LangGraph** orchestration with **Hybrid RAG**, this agent doesn't just find jobs—it validates them against your professional Resume.
+Tired of manually checking jobs? I built Job-Search-Agent. It’s an AI system that finds job links, scrapes and analyses them. It uses a Hybrid RAG pipeline to validate each job against your resume, so you only apply to job that matters.
 
 ---
 
@@ -12,7 +12,7 @@ Job-Search-Agent is an AI system that orchestrates specialised agents to automat
 </p>
 
 The system operates in a stateful manner:
-1.  **Intent Classifier:** Analyses the query to decide between a fresh search or a follow-up conversation.
+1.  **Intent Classifier:** Analyses the query to decide between a search or a follow-up conversation.
 2.  **Rewrite Node:** Resolves pronouns from chat history and optimises search strings.
 3.  **Search & Scrape:** Executes live web searches via **Tavily** and deep-crawls job posts using **Crawl4AI**.
 4.  **Hybrid RAG Analysis:** Pulls resume data from **PostgreSQL**, reranks findings, and provides Match Scores (0-100).
