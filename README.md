@@ -1,4 +1,5 @@
-﻿# AGENTIC RAG BOT
+## System Architecture
 
- ## will add a proper readme file when project will be completed
- # ONGOING PROJECT
+<p align="center">
+  <img src="Job Agent Final 1.png" width="600" title="System Architecture">
+</p>
