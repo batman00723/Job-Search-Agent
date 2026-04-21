@@ -17,7 +17,7 @@ class JobAgentState(Schema):
     # The final matching reports comparing the job to your resume
     match_reports: list[dict] = Field(default_factory= list)
 
-    retry_count: int 
+    retry_count: int = 0
 
     user_id: int
 
