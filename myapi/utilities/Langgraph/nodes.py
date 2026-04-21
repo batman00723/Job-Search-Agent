@@ -106,7 +106,7 @@ def router(state: JobAgentState):
             print(f"No links found. Retying attempt {state.retry_count + 1}/3")
             return "rewrite_query_node"
         else:
-            print("Sorry! But ig you'll remain unemployed for now, cus we can't even find a shit for you.")
+            print("Sorry! I can't find any suitable Job for you.")
             return END
         
 
