@@ -58,29 +58,24 @@ class DocumentOperationController(ControllerBase):
 
         print(">>> ask_agent called") 
 
-        session_id= "aman-session-00"
-        
+        session_id= f"{request.user.id}aman-session-0041"
         config= {"configurable": {"thread_id": session_id}}
         
         initial_state= {
             "query": query,
-            "job_urls": [],
-            "scraped_content": [],
-            "retry_count": 0,
             "user_id": request.user.id
         }
 
         try:
+
             final_state= self.job_agent.invoke(initial_state, config= config)
+            print(">>> agent did work")
+
             report= final_state.get("match_reports", [])
+            # This is for chat
             last_message= final_state.get("messages")[-1].content if final_state.get("messages") else ""
 
-            send_llm_response_email(settings.email_host_user,
-                                    question= query,
-                                    answer= report)
-
             return{
-                "status": "Success",
                 "answer": last_message,
                 "job_report": report
             }
@@ -112,3 +107,4 @@ class DocumentOperationController(ControllerBase):
     def get_my_doc(self, request, doc_id: int):
         document= get_object_or_404(Document, user= request.user, id= doc_id, is_deleted= False)
         return document
+    
